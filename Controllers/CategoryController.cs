@@ -1,4 +1,5 @@
 ﻿using GastonAPI.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using System.Linq;
 using System.Net.Mail;
 using System.Security.Claims;
+using System.Security.Principal;
 
 namespace GastonAPI.Controllers
 {
@@ -36,13 +38,18 @@ namespace GastonAPI.Controllers
 
         [HttpGet]
         [Route("CategoryList")]
+        [Authorize]
         public IActionResult CategoryList()
         {
-            List<Category> categories = new List<Category>();
-
             var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
 
-            var valid = OtherFunctions.ValidateToken(identity);
+            if (!isAdmin)
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
+            List<Category> categories = new List<Category>();
 
             try
             {
@@ -58,9 +65,25 @@ namespace GastonAPI.Controllers
 
         [HttpGet]
         [Route("CategoryListUser")]
+        [Authorize]
         public IActionResult CategoryListUser(int userId)
         {
-            List<Category> userCategories = _dbcontext.Categories.Where(x => x.FkUser == userId).ToList();
+            User objUser = _dbcontext.Users.Find(userId);
+
+            if (objUser == null)
+            {
+                return NotFound(new { mensaje = "Data not found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objUser.Id.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
+            List<Category> userCategories = _dbcontext.Categories.Where(x => x.FkUser == objUser.Id).ToList();
 
             if (userCategories.Count <= 0)
             {
@@ -83,11 +106,9 @@ namespace GastonAPI.Controllers
 
         }
 
-        /**
-         * TODO: Un usuario solo puede ver detalles de sus categorías
-         */
         [HttpGet]
         [Route("CategoryDet")]
+        [Authorize]
         public IActionResult CategoryDet(int id)
         {
             Category objCategory = _dbcontext.Categories.Find(id);
@@ -95,6 +116,14 @@ namespace GastonAPI.Controllers
             if (objCategory == null)
             {
                 return NotFound(new { mensaje = "Data not found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objCategory.FkUser.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
             }
 
             try
@@ -110,14 +139,61 @@ namespace GastonAPI.Controllers
             }
         }
 
+        [HttpGet]
+        [Route("CategoryAmount")]
+        [Authorize]
+        public IActionResult CategoryAmount(int id)
+        {
+            Category objCategory = _dbcontext.Categories.Find(id);
+
+            if (objCategory == null)
+            {
+                return NotFound(new { mensaje = "Data not found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objCategory.FkUser.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
+            List<Expense> expenseList = _dbcontext.Expenses.Where(x => x.FkCategory == objCategory.Id).ToList();
+
+            if (expenseList.Count <= 0)
+            {
+                return StatusCode(StatusCodes.Status404NotFound, new { messsage = "This category has no expenses" });
+            }
+
+            double? totalAmount = 0;
+
+            foreach (Expense expense in expenseList)
+            {
+                totalAmount += expense.Amount;
+            }
+
+            return StatusCode(StatusCodes.Status200OK, new { message = "OK", response = new { category = objCategory, totalAmount = totalAmount } });
+
+            
+        }
 
         [HttpPost]
         [Route("SaveCategory")]
+        [Authorize]
         public IActionResult SaveCategory([FromBody] Category objCategory)
         {
             if (string.IsNullOrEmpty(objCategory.Name) || string.IsNullOrEmpty(objCategory.FkUser.ToString()))
             {
                 return StatusCode(StatusCodes.Status400BadRequest, new { message = "Missing Required Fields" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objCategory.FkUser.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
             }
 
             try
@@ -158,11 +234,10 @@ namespace GastonAPI.Controllers
 
         }
 
-        /**
-         * TODO: Solo los usuarios administradores pueden mover una categoría a otro usuario
-         */
+        
         [HttpPut]
         [Route("UpdateCategory")]
+        [Authorize]
         public IActionResult UpdateCategory([FromBody] Category objCategory)
         {
             Category _Category = _dbcontext.Categories.Find(objCategory.Id);
@@ -170,6 +245,17 @@ namespace GastonAPI.Controllers
             if (_Category == null)
             {
                 return NotFound(new { mensaje = "Category not Found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            // Does the editing category not belong to the user or is it being moved to a different user?
+            if (!isAdmin && 
+                (!OtherFunctions.ValidateSelf(identity, _Category.FkUser.ToString()) || 
+                (objCategory.FkUser != null && !OtherFunctions.ValidateSelf(identity, objCategory.FkUser.ToString()))))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
             }
 
             try
@@ -217,7 +303,8 @@ namespace GastonAPI.Controllers
 
         [HttpDelete]
         [Route("DeleteCategory")]
-        public IActionResult DeleteCategory(int id, string mode = "nocategory", int moveTo = 0)
+        [Authorize]
+        public IActionResult DeleteCategory(int id, string? mode, int? moveTo)
         {
             Category objCategory = _dbcontext.Categories.Find(id);
 
@@ -226,9 +313,22 @@ namespace GastonAPI.Controllers
                 return NotFound(new { message = "Category not found" });
             }
 
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objCategory.FkUser.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
             if (objCategory.Name == "No Category")
             {
                 return BadRequest(new { message = "This category can't be deleted"});
+            }
+
+            if (mode == null)
+            {
+                mode = "nocategory";
             }
 
             try
@@ -237,15 +337,27 @@ namespace GastonAPI.Controllers
                 {
                     case "move":
                         {
-                            if (moveTo == 0)
+                            if (moveTo == null)
                             {
                                 return StatusCode(StatusCodes.Status400BadRequest,  new { message = "Category to move not specified" });
+                            }
+
+                            Category toMove = _dbcontext.Categories.Find(moveTo);
+
+                            if (toMove == null)
+                            {
+                                return StatusCode(StatusCodes.Status400BadRequest, new { message = "Category to move not found" });
+                            }
+
+                            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, toMove.FkUser.ToString()))
+                            {
+                                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
                             }
 
                             List<Expense> catExpenses = _dbcontext.Expenses.Where(x => x.FkCategory == objCategory.Id && x.FkUser == objCategory.FkUser).ToList();
                             foreach (Expense expense in catExpenses)
                             {
-                                expense.FkCategory = moveTo;
+                                expense.FkCategory = toMove.Id;
 
                                 _dbcontext.Update(expense);
                             }

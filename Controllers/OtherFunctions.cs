@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using Microsoft.AspNetCore.Identity;
+using System.Security.Claims;
 
 namespace GastonAPI.Controllers
 {
@@ -21,6 +22,36 @@ namespace GastonAPI.Controllers
             {
                 return false;
             }
+        }
+
+        public static bool ValidateAdmin(ClaimsIdentity identity)
+        {
+            var claims = identity.Claims;
+
+            foreach (var claim in claims)
+            {
+                if (claim.Type == "Role" && claim.Value.ToLower() != "admin")
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public static bool ValidateSelf(ClaimsIdentity identity, string id)
+        {
+            var claims = identity.Claims;
+
+            foreach (var claim in claims)
+            {
+                if (claim.Type == "Id" && claim.Value != id.ToString())
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

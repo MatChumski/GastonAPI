@@ -1,5 +1,7 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace GastonAPI.Models;
 
@@ -21,7 +23,9 @@ public partial class Expense
 
     public DateTime? CreationDate { get; set; }
 
+    [JsonIgnore]
     public virtual Category? FkCategoryNavigation { get; set; }
 
+    [JsonIgnore]
     public virtual User? FkUserNavigation { get; set; }
 }

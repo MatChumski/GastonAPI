@@ -1,10 +1,14 @@
 ﻿using GastonAPI.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using System.Diagnostics.Contracts;
+using System.IdentityModel.Tokens.Jwt;
 using System.Net.Mail;
 using System.Security.Claims;
+using System.Text;
 using static System.Net.Mime.MediaTypeNames;
 
 namespace GastonAPI.Controllers
@@ -36,13 +40,19 @@ namespace GastonAPI.Controllers
 
         [HttpGet]
         [Route("UserList")]
+        [Authorize]
         public IActionResult UserList()
         {
             List<User> users = new List<User>();
 
+            // Context variable that brings the token
             var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
 
-            var valid = OtherFunctions.ValidateToken(identity);
+            if (!isAdmin)
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }            
 
             try
             {
@@ -58,6 +68,7 @@ namespace GastonAPI.Controllers
 
         [HttpGet]
         [Route("UserDet")]
+        [Authorize]
         public IActionResult UserDet(int id)
         {
             User objUser = _dbcontext.Users.Find(id);
@@ -65,6 +76,14 @@ namespace GastonAPI.Controllers
             if (objUser == null)
             {
                 return NotFound(new { mensaje = "Data not found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objUser.Id.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
             }
 
             try
@@ -82,8 +101,17 @@ namespace GastonAPI.Controllers
 
         [HttpPost]
         [Route("SaveUser")]
+        [Authorize]
         public IActionResult SaveUser([FromBody] User objUser)
         {
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin)
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
             // Check empty fields
             if (string.IsNullOrEmpty(objUser.Username) || string.IsNullOrEmpty(objUser.Password) || string.IsNullOrEmpty(objUser.Email))
             {
@@ -163,6 +191,7 @@ namespace GastonAPI.Controllers
 
         [HttpPut]
         [Route("UpdateUser")]
+        [Authorize]
         public IActionResult UpdateUser([FromBody] User objUser)
         {
             User _User = _dbcontext.Users.Find(objUser.Id);
@@ -170,6 +199,14 @@ namespace GastonAPI.Controllers
             if (_User == null)
             {
                 return NotFound(new { mensaje = "User not Found" });
+            }
+
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objUser.Id.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
             }
 
             try
@@ -225,17 +262,26 @@ namespace GastonAPI.Controllers
 
         [HttpDelete]
         [Route("DeleteUser")]
+        [Authorize]
         public IActionResult DeleteUser(int id)
         {
-            User ObjUser = _dbcontext.Users.Find(id);
+            User objUser = _dbcontext.Users.Find(id);
 
-            if (ObjUser == null)
+            if (objUser == null)
             {
                 return NotFound(new { mensaje = "User not found" });
             }
 
-            List<Category> userCategories = _dbcontext.Categories.Where(x => x.FkUser == ObjUser.Id).ToList();
-            List<Expense> userExpenses = _dbcontext.Expenses.Where(x => x.FkUser == ObjUser.Id).ToList();
+            var identity = HttpContext.User.Identity as ClaimsIdentity;
+            bool isAdmin = OtherFunctions.ValidateAdmin(identity);
+
+            if (!isAdmin && !OtherFunctions.ValidateSelf(identity, objUser.Id.ToString()))
+            {
+                return StatusCode(StatusCodes.Status401Unauthorized, new { message = "You are not authorized for this operation" });
+            }
+
+            List<Category> userCategories = _dbcontext.Categories.Where(x => x.FkUser == objUser.Id).ToList();
+            List<Expense> userExpenses = _dbcontext.Expenses.Where(x => x.FkUser == objUser.Id).ToList();
 
             try
             {
@@ -248,7 +294,7 @@ namespace GastonAPI.Controllers
                     _dbcontext.Categories.Remove(category);
                 }
 
-                _dbcontext.Users.Remove(ObjUser);
+                _dbcontext.Users.Remove(objUser);
                 _dbcontext.SaveChanges();
                 return StatusCode(StatusCodes.Status200OK, new { message = "OK", response = "User and its dependencies deleted successfully" });
 
@@ -257,6 +303,55 @@ namespace GastonAPI.Controllers
             {
                 return StatusCode(StatusCodes.Status404NotFound, new { message = "Couldn't delete any data" });
 
+            }
+        }
+
+        [HttpPost]
+        [Route("Login")]
+
+        public IActionResult Login([FromBody] User objUser)
+        {
+            try
+            {
+
+                User _User = _dbcontext.Users.Where(x => (x.Username == objUser.Username || x.Email == objUser.Email) && x.Password == objUser.Password).FirstOrDefault();
+
+                if (_User == null)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { message = "User not found" });
+                }
+
+                var jwt = _configuration.GetSection("Jwt").Get<Jwt>();
+
+                var claims = new[]
+                {
+                    new Claim(JwtRegisteredClaimNames.Sub, jwt.Subject),
+                    new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                    new Claim(JwtRegisteredClaimNames.Iat, DateTime.UtcNow.ToString()),
+                    new Claim("Id", _User.Id.ToString()),
+                    new Claim("Username", _User.Username),
+                    new Claim("Email", _User.Email),
+                    new Claim("Role", _User.Role)
+                };
+
+                SymmetricSecurityKey key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key));
+                SigningCredentials signCreds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+                JwtSecurityToken jwtToken = new JwtSecurityToken(
+                    jwt.Issuer,
+                    jwt.Audience,
+                    claims,
+                    expires: DateTime.Now.AddMinutes(5),
+                    signingCredentials: signCreds
+                    );
+
+                return StatusCode(StatusCodes.Status200OK, new { message = "OK", token = new JwtSecurityTokenHandler().WriteToken(jwtToken) });
+
+
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status406NotAcceptable, new { message = ex.Message });
             }
         }
     }
